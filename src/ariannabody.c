@@ -431,6 +431,10 @@ void softmax(float* x, int size) {
 
 void matmul(float* out, float* x, float* w, int n, int d) {
     // W (d, n) @ x (n,) = out (d,)
+#ifdef USE_BLAS
+    cblas_sgemv(CblasRowMajor, CblasNoTrans, d, n,
+                1.0f, w, n, x, 1, 0.0f, out, 1);
+#else
     for (int i = 0; i < d; i++) {
         float val = 0.0f;
         for (int j = 0; j < n; j++) {
@@ -438,6 +442,7 @@ void matmul(float* out, float* x, float* w, int n, int d) {
         }
         out[i] = val;
     }
+#endif
 }
 
 void apply_rope(float* q, float* k, float* rope_cos, float* rope_sin,

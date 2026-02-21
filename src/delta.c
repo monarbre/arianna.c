@@ -113,7 +113,8 @@ static void free_low_rank_delta(LowRankDelta* d) {
 }
 
 // Compute ΔW @ x and add to output
-// out += (A @ B) @ x = A @ (B @ x)
+// out += scale * (A @ B) @ x = scale * A @ (B @ x)
+// BLAS path: cblas_sgemv × 2 (f32 B path only, int8 falls back to scalar)
 static void apply_delta(LowRankDelta* d, float* out, float* x, float scale) {
     if (d->A == NULL) return;
 
@@ -122,7 +123,7 @@ static void apply_delta(LowRankDelta* d, float* out, float* x, float scale) {
     memset(temp, 0, sizeof(temp));
 
     if (d->quantized && d->B_quant != NULL) {
-        // int8 path: dequantize on the fly
+        // int8 path: dequantize on the fly (no BLAS — needs dequant)
         for (int r = 0; r < d->rank; r++) {
             for (int j = 0; j < d->in_dim; j++) {
                 float b_val = (float)d->B_quant[r * d->in_dim + j] * d->B_scale + d->B_zero;
@@ -130,22 +131,32 @@ static void apply_delta(LowRankDelta* d, float* out, float* x, float scale) {
             }
         }
     } else if (d->B != NULL) {
-        // float32 path
+#ifdef USE_BLAS
+        // temp = B @ x  (BLAS: sgemv, rank × in_dim @ in_dim → rank)
+        cblas_sgemv(CblasRowMajor, CblasNoTrans, d->rank, d->in_dim,
+                    1.0f, d->B, d->in_dim, x, 1, 0.0f, temp, 1);
+#else
         for (int r = 0; r < d->rank; r++) {
             for (int j = 0; j < d->in_dim; j++) {
                 temp[r] += d->B[r * d->in_dim + j] * x[j];
             }
         }
+#endif
     } else {
         return;
     }
 
     // out += scale * A @ temp
+#ifdef USE_BLAS
+    cblas_sgemv(CblasRowMajor, CblasNoTrans, d->out_dim, d->rank,
+                scale, d->A, d->rank, temp, 1, 1.0f, out, 1);
+#else
     for (int i = 0; i < d->out_dim; i++) {
         for (int r = 0; r < d->rank; r++) {
             out[i] += scale * d->A[i * d->rank + r] * temp[r];
         }
     }
+#endif
 }
 
 // ============================================================
@@ -447,38 +458,64 @@ void micro_update(MicroTrainer* mt, LowRankDelta* delta,
     // Compute B @ pre_trace
     float b_pre[DELTA_RANK];
     memset(b_pre, 0, sizeof(b_pre));
+#ifdef USE_BLAS
+    cblas_sgemv(CblasRowMajor, CblasNoTrans, delta->rank, delta->in_dim,
+                1.0f, delta->B, delta->in_dim, mt->pre_trace, 1, 0.0f, b_pre, 1);
+#else
     for (int r = 0; r < delta->rank; r++) {
         for (int j = 0; j < delta->in_dim; j++) {
             b_pre[r] += delta->B[r * delta->in_dim + j] * mt->pre_trace[j];
         }
     }
+#endif
 
     // Update A: ΔA[i,r] = lr * post_trace[i] * b_pre[r]
+#ifdef USE_BLAS
+    // A += lr * post_trace ⊗ b_pre  (rank-1 update)
+    cblas_sger(CblasRowMajor, delta->out_dim, delta->rank,
+               lr, mt->post_trace, 1, b_pre, 1, delta->A, delta->rank);
+    // Apply decay to A
+    int a_size = delta->out_dim * delta->rank;
+    cblas_sscal(a_size, mt->decay, delta->A, 1);
+#else
     for (int i = 0; i < delta->out_dim; i++) {
         for (int r = 0; r < delta->rank; r++) {
             delta->A[i * delta->rank + r] += lr * mt->post_trace[i] * b_pre[r];
-            // Apply decay
             delta->A[i * delta->rank + r] *= mt->decay;
         }
     }
+#endif
 
     // Compute A^T @ post_trace
     float at_post[DELTA_RANK];
     memset(at_post, 0, sizeof(at_post));
+#ifdef USE_BLAS
+    cblas_sgemv(CblasRowMajor, CblasTrans, delta->out_dim, delta->rank,
+                1.0f, delta->A, delta->rank, mt->post_trace, 1, 0.0f, at_post, 1);
+#else
     for (int r = 0; r < delta->rank; r++) {
         for (int i = 0; i < delta->out_dim; i++) {
             at_post[r] += delta->A[i * delta->rank + r] * mt->post_trace[i];
         }
     }
+#endif
 
     // Update B: ΔB[r,j] = lr * at_post[r] * pre_trace[j]
+#ifdef USE_BLAS
+    // B += lr * at_post ⊗ pre_trace  (rank-1 update)
+    cblas_sger(CblasRowMajor, delta->rank, delta->in_dim,
+               lr, at_post, 1, mt->pre_trace, 1, delta->B, delta->in_dim);
+    // Apply decay to B
+    int b_size = delta->rank * delta->in_dim;
+    cblas_sscal(b_size, mt->decay, delta->B, 1);
+#else
     for (int r = 0; r < delta->rank; r++) {
         for (int j = 0; j < delta->in_dim; j++) {
             delta->B[r * delta->in_dim + j] += lr * at_post[r] * mt->pre_trace[j];
-            // Apply decay
             delta->B[r * delta->in_dim + j] *= mt->decay;
         }
     }
+#endif
 
     // Guard against cumulative reinforcement in long sessions.
     // Decay alone (0.999) can't prevent runaway if updates outpace it.

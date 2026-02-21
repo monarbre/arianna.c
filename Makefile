@@ -17,6 +17,21 @@ else
   RPATH_FLAG = -Wl,-rpath,'$$ORIGIN'
 endif
 
+# ═══ BLAS Acceleration (optional) ═══
+# Use: make BLAS=1
+# macOS: Apple Accelerate (AMX/Neural Engine, zero deps)
+# Linux: OpenBLAS (apt install libopenblas-dev)
+# Accelerates: matmul, apply_delta, micro_update (cblas_sgemv/sger/sdot)
+ifdef BLAS
+  ifeq ($(UNAME),Darwin)
+    CFLAGS += -DUSE_BLAS -DACCELERATE
+    LDFLAGS += -framework Accelerate
+  else
+    CFLAGS += -DUSE_BLAS
+    LDFLAGS += -lopenblas
+  endif
+endif
+
 # Go library (unified: tongue + inner_world + cloud)
 GO_LIB_DIR = lib
 GO_LDFLAGS = -L$(GO_LIB_DIR) -larianna $(RPATH_FLAG)

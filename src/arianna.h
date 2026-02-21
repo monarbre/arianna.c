@@ -17,6 +17,23 @@
 #include <stdint.h>
 
 // ============================================================
+// BLAS Acceleration (optional)
+// Compile with -DUSE_BLAS to enable hardware-accelerated matmul:
+//   macOS:  -DUSE_BLAS -DACCELERATE -framework Accelerate
+//   Linux:  -DUSE_BLAS -lopenblas
+// Without USE_BLAS: pure scalar C (portable, correct, slower)
+// Evolved in molequla, ported to AML core, propagated here.
+// ============================================================
+#ifdef USE_BLAS
+  #ifdef ACCELERATE
+    #define ACCELERATE_NEW_LAPACK
+    #include <Accelerate/Accelerate.h>
+  #else
+    #include <cblas.h>
+  #endif
+#endif
+
+// ============================================================
 // Default Constants (for compatibility with arianna_dynamic.c)
 // These are defaults; actual values come from Config at runtime
 // Updated for Arianna Unified 20M (Jan 2026)

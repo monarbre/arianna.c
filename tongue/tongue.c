@@ -27,6 +27,16 @@
 #include <fcntl.h>
 #include <unistd.h>
 
+// BLAS acceleration (optional)
+#ifdef USE_BLAS
+  #ifdef ACCELERATE
+    #define ACCELERATE_NEW_LAPACK
+    #include <Accelerate/Accelerate.h>
+  #else
+    #include <cblas.h>
+  #endif
+#endif
+
 // ---------------------------------------------------------------------------
 // Half-float (IEEE 754 binary16) to float conversion
 // ---------------------------------------------------------------------------
@@ -186,7 +196,20 @@ static void rmsnorm(float* out, const float* x, int size) {
 }
 
 // FP16 matmul: out[rows] = W_f16[rows, cols] @ x[cols]
+// BLAS path: dequant row to temp buffer, then cblas_sdot
 static void matmul_f16(float* out, const uint16_t* w, const float* x, int rows, int cols) {
+#ifdef USE_BLAS
+    float* tmp = (float*)malloc(cols * sizeof(float));
+    if (tmp) {
+        for (int i = 0; i < rows; i++) {
+            const uint16_t* row = w + (size_t)i * cols;
+            for (int j = 0; j < cols; j++) tmp[j] = half_to_float(row[j]);
+            out[i] = cblas_sdot(cols, tmp, 1, x, 1);
+        }
+        free(tmp);
+        return;
+    }
+#endif
     for (int i = 0; i < rows; i++) {
         float sum = 0.0f;
         const uint16_t* row = w + (size_t)i * cols;
@@ -198,7 +221,20 @@ static void matmul_f16(float* out, const uint16_t* w, const float* x, int rows, 
 }
 
 // Q8 matmul: out[rows] = (W_i8[rows, cols] * scales[rows]) @ x[cols]
+// BLAS path: dequant row to temp buffer, then cblas_sdot
 static void matmul_q8(float* out, const int8_t* w, const float* scales, const float* x, int rows, int cols) {
+#ifdef USE_BLAS
+    float* tmp = (float*)malloc(cols * sizeof(float));
+    if (tmp) {
+        for (int i = 0; i < rows; i++) {
+            const int8_t* row = w + (size_t)i * cols;
+            for (int j = 0; j < cols; j++) tmp[j] = (float)row[j];
+            out[i] = cblas_sdot(cols, tmp, 1, x, 1) * scales[i];
+        }
+        free(tmp);
+        return;
+    }
+#endif
     for (int i = 0; i < rows; i++) {
         float sum = 0.0f;
         const int8_t* row = w + (size_t)i * cols;
